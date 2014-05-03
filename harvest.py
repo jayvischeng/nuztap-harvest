@@ -46,21 +46,29 @@ import uuid
 from optparse import OptionParser
 import pymongo
 
-
-# Create a Twitter app and populate these credentials with the values
-# See https://apps.twitter.com/
-CONSUMER_KEY = ''
-CONSUMER_SECRET = ''
-
-# Name this something unique
-MONGODB_DATABASE_NAME="hacknashville"
+MY_NAME = sys.argv[0].split(".")[0]
 
 # A little session keeping/logging happens along the way
 SESSION_ID = unicode(uuid.uuid4().get_hex())
 TEMP_DIR_BASE = "/tmp/{0}-tmp/".format(MY_NAME)
 TEMP_DIR = os.path.join(TEMP_DIR_BASE, "session-{0}")
 
-MY_NAME = sys.argv[0].split(".")[0]
+# take the first three arguments and write them to the file that oauth_login will expect
+# XXX: For now, UID Is referenced in oauth_login to simplify invocations
+UID, oauth_token, oauth_secret = sys.argv[1], sys.argv[2], sys.argv[3]
+my_twitter_creds_file = os.path.expanduser(os.path.join(TEMP_DIR_BASE, UID + '.twitter.oauth'))
+twitter.write_token_file(my_twitter_creds_file, oauth_token, oauth_secret)
+
+# Create a Twitter app and populate these credentials with the values
+# See https://apps.twitter.com/
+
+# XXX: Move these values to an external config file to prevent accidental checkin
+CONSUMER_KEY = ''
+CONSUMER_SECRET = ''
+
+# Name this something unique
+MONGODB_DATABASE_NAME="hacknashville"
+MONGODB_COLL_NAME="harvests"
 
 # For piping Unicode through stdout
 sys.stdout=codecs.getwriter('utf-8')(sys.stdout)
@@ -87,15 +95,18 @@ def log_timing(func_to_decorate):
     wrapper.__name__ = func_to_decorate.__name__
     return wrapper
 
-
+# Assumes that twitter.write_token_file has already been called to store uid.twitter.oauth
+# so that this invocation cal access the oauth token/secret
 def oauth_login():
     # See https://dev.twitter.com/docs/auth/oauth for more information 
     # on Twitter's OAuth implementation.
 
-    my_twitter_creds = os.path.expanduser(os.path.join(TEMP_DIR_BASE, 'twitter.oauth'))
-    if not os.path.exists(my_twitter_creds):
-        twitter.oauth_dance("Buzzwuz Reloaded", CONSUMER_KEY, CONSUMER_SECRET,
-                    my_twitter_creds)
+    my_twitter_creds = os.path.expanduser(os.path.join(TEMP_DIR_BASE, UID + '.twitter.oauth'))
+
+    # No need to do this...
+    #if not os.path.exists(my_twitter_creds):
+    #    twitter.oauth_dance("nuztap", CONSUMER_KEY, CONSUMER_SECRET,
+    #                my_twitter_creds)
 
     oauth_token, oauth_secret = twitter.read_token_file(my_twitter_creds)
 
@@ -431,7 +442,7 @@ def extract_tweet_entities(statuses):
     if status['entities'].has_key('media'): 
         media = [ (status['id_str'], media['url'])
                          for status in statuses  
-                            for media in status['entities']['media'] ]
+                            for media in status['entities'].get('media', '') ]
     else:
         media = []
 
@@ -540,7 +551,7 @@ def get_web_page_meta(urls, mutable_results_reference, content_size=4096):
 
     # This callback references mutable_results_reference
     
-    rs = (grequests.get(url, timeout=5, 
+    rs = (grequests.get(url, timeout=15,  # XXX: Should be more like 5 seconds
                              callback=process_response_hook(dict(original_url=url, tweet_id=tweet_id, content_size=content_size), 
                              mutable_results_reference)) 
             for (tweet_id, url) in urls)
@@ -590,7 +601,9 @@ def build_features(tweets, web_page_meta):
 
                  twitter_screen_name=authenticated_twitter_screen_name,
 
-                 hostname=urlparse(wp['final_url']).hostname
+                 hostname=urlparse(wp['final_url']).hostname,
+
+                 uid=UID,
                 )
 
         try:
@@ -717,7 +730,7 @@ def print_features(features, indent=4):
    
 
 def insert_features_into_mongo(features):
-    coll_name = get_authenticated_screen_name() + "-harvest-xxx"
+    coll_name = MONGODB_COLL_NAME
     return save_to_mongo(features, MONGODB_DATABASE_NAME, coll_name)
  
 def save_to_mongo(data, mongo_db, mongo_db_coll, **mongo_conn_kw):
@@ -741,6 +754,7 @@ def save_to_mongo(data, mongo_db, mongo_db_coll, **mongo_conn_kw):
 
 
 if __name__ == '__main__':
+
 
     # A few options to facilitate debugging/dev workflows. Using --session_id is especially useful during development
     parser = OptionParser()
@@ -784,6 +798,7 @@ if __name__ == '__main__':
         # that can be cast into a dict, keyed off of tweet_id
         web_page_meta = [] 
 
+        # XXX: Could make these be totally streaming now that data is being written to Mongo.
         urls = get_web_page_urls(tweets)
         get_web_page_meta(urls, web_page_meta, content_size=None)
         web_page_meta = dict(web_page_meta)
